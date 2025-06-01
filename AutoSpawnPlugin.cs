@@ -226,67 +226,79 @@ namespace StrefaOdrodzenia
 
         private void OnPlayerRevive(UnturnedPlayer player, Vector3 position, byte angle)
         {
-            if (!TrappedPlayers.TryGetValue(player.CSteamID, out var data)) return;
-
-            ZoneConfiguration zone = FindNearestZone(position, player);
-            if (zone != null && player.Player != null)
+            try
             {
-                Vector3 spawnPos = CalculateSpawnPosition(zone);
-                player.Player.teleportToLocation(spawnPos, player.Rotation);
+                // Debug: Sprawdź jakie grupy ma gracz
+                var groups = Rocket.Core.R.Permissions.GetGroups(player, false);
+                Rocket.Core.Logging.Logger.Log($"Gracz {player.DisplayName} grupy: {string.Join(", ", groups.Select(g => g.Id))}");
 
-                // Zmiana z Bypass na Priority
-                if (zone.Priority != "t")
-                    TrapPlayer(player, zone);
+                ZoneConfiguration zone = FindNearestZone(position, player);
+                if (zone != null)
+                {
+                    Vector3 spawnPos = CalculateSpawnPosition(zone);
+                    player.Player.teleportToLocation(spawnPos, angle);
+
+                    // Automatyczne uwięzienie tylko jeśli to strefa z czasem
+                    if (zone.TrapTimeSeconds > 0)
+                    {
+                        TrapPlayer(player, zone);
+                    }
+
+                    UnturnedChat.Say(player, $"Odrodziłeś się w strefie {zone.ZoneName}", Color.cyan);
+                }
                 else
-                    UnturnedChat.Say(player, "Strefa priorytetowa!", Color.green);
+                {
+                    Rocket.Core.Logging.Logger.Log($"Nie znaleziono strefy dla {player.DisplayName}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Rocket.Core.Logging.Logger.LogError($"Błąd podczas odradzania: {ex}");
             }
         }
 
         private bool PlayerHasPermissionOrInGroup(UnturnedPlayer player, string permissionOrGroup)
         {
-            // Sprawdź bezpośrednią permisję
+            if (string.IsNullOrEmpty(permissionOrGroup))
+                return true;
+
+            // 1. Sprawdź bezpośrednią permisję
             if (player.HasPermission(permissionOrGroup))
                 return true;
 
-            // Sprawdź grupy gracza przez R.Permissions
-            var playerGroups = Rocket.Core.R.Permissions.GetGroups(player, false);
-            return playerGroups.Any(g => g.Id.Equals(permissionOrGroup, StringComparison.OrdinalIgnoreCase));
+            // 2. Sprawdź czy gracz należy do grupy
+            try
+            {
+                var playerGroups = Rocket.Core.R.Permissions.GetGroups(player, false);
+                return playerGroups?.Any(g =>
+                    g.Id.Equals(permissionOrGroup, StringComparison.OrdinalIgnoreCase)) ?? false;
+            }
+            catch (Exception ex)
+            {
+                Rocket.Core.Logging.Logger.LogError($"Błąd sprawdzania grup: {ex}");
+                return false;
+            }
         }
 
         private ZoneConfiguration FindNearestZone(Vector3 position, UnturnedPlayer player)
         {
-            // 1. Najpierw strefy z PRIORYTETEM
-            foreach (var zone in Configuration.Instance.Zones)
+            // 1. Znajdź wszystkie strefy do których gracz ma dostęp
+            var availableZones = Configuration.Instance.Zones
+                .Where(z => string.IsNullOrEmpty(z.RequiredPermission) ||
+                           PlayerHasPermissionOrInGroup(player, z.RequiredPermission))
+                .ToList();
+
+            // 2. Najpierw sprawdź strefy z priorytetem
+            var priorityZone = availableZones.FirstOrDefault(z => z.Priority == "t");
+            if (priorityZone != null && PlayerHasPermissionOrInGroup(player, priorityZone.RequiredPermission))
             {
-                if (zone.Priority == "t" &&
-                    (string.IsNullOrEmpty(zone.RequiredPermission) ||
-                     PlayerHasPermissionOrInGroup(player, zone.RequiredPermission)))
-                {
-                    return zone;
-                }
+                return priorityZone;
             }
 
-            // 2. Jeśli nie ma priorytetowych, szukaj najbliższej dostępnej
-            ZoneConfiguration nearestZone = null;
-            float nearestDistance = float.MaxValue;
-
-            foreach (var zone in Configuration.Instance.Zones)
-            {
-                if (!string.IsNullOrEmpty(zone.RequiredPermission) &&
-                    !PlayerHasPermissionOrInGroup(player, zone.RequiredPermission))
-                    continue;
-
-                Vector3 center = new Vector3(zone.Center.X, zone.Center.Y, zone.Center.Z);
-                float distance = Vector3.Distance(position, center);
-
-                if (distance < nearestDistance)
-                {
-                    nearestDistance = distance;
-                    nearestZone = zone;
-                }
-            }
-
-            return nearestZone;
+            // 3. Jeśli nie ma priorytetowej, znajdź najbliższą dostępną strefę
+            return availableZones
+                .OrderBy(z => Vector3.Distance(position, new Vector3(z.Center.X, z.Center.Y, z.Center.Z)))
+                .FirstOrDefault();
         }
 
         private Vector3 CalculateSpawnPosition(ZoneConfiguration zone)
@@ -311,17 +323,18 @@ namespace StrefaOdrodzenia
             if (remainingTime == -1)
                 remainingTime = zone.TrapTimeSeconds;
 
-            if (TrappedPlayers.ContainsKey(player.CSteamID))
-                ForceReleasePlayer(player, false);
-
-            double endTimestamp = GetCurrentTimestamp() + remainingTime;
-
+            // Sprawdź uprawnienia przed uwięzieniem
             if (!string.IsNullOrEmpty(zone.RequiredPermission) &&
-        !player.HasPermission(zone.RequiredPermission))
+                !PlayerHasPermissionOrInGroup(player, zone.RequiredPermission))
             {
                 UnturnedChat.Say(player, "Nie masz dostępu do tej strefy!", Color.red);
                 return;
             }
+
+            if (TrappedPlayers.ContainsKey(player.CSteamID))
+                ForceReleasePlayer(player, false);
+
+            double endTimestamp = GetCurrentTimestamp() + remainingTime;
 
             TrappedPlayers[player.CSteamID] = new TrappedPlayerData
             {
@@ -331,34 +344,14 @@ namespace StrefaOdrodzenia
                 Coroutine = StartCoroutine(TrappedLoop(player, zone, endTimestamp))
             };
 
-            Configuration.Instance.SavedTrappedPlayers.Add(new TrappedPlayerDataConfig
-            {
-                SteamID = player.CSteamID.ToString(),
-                RemainingTimeSeconds = remainingTime,
-                ZoneName = zone.ZoneName
-            });
-            Configuration.Save();
-
+            // Efekty wizualne i powiadomienia
             if (player.Player != null)
             {
                 player.Player.inventory.isStoring = true;
                 player.Player.interact.enabled = false;
                 EffectManager.sendUIEffect(8490, 8490, player.Player.channel.owner.transportConnection, true);
-                EffectManager.sendUIEffectText(8490, player.Player.channel.owner.transportConnection, true, "ileczasu", $"Czas kary: {FormatTime(remainingTime)}");
-            }
-
-            if (!string.IsNullOrEmpty(Configuration.Instance.NotificationPermission))
-            {
-                foreach (SteamPlayer client in Provider.clients)
-                {
-                    UnturnedPlayer target = UnturnedPlayer.FromSteamPlayer(client);
-                    if (target != null && target.HasPermission(Configuration.Instance.NotificationPermission))
-                    {
-                        UnturnedChat.Say(target,
-                            $"[{player.CharacterName}] {player.DisplayName} został uwięziony w {zone.ZoneName} na {FormatTime(remainingTime)}!",
-                            Color.yellow);
-                    }
-                }
+                EffectManager.sendUIEffectText(8490, player.Player.channel.owner.transportConnection, true,
+                    "ileczasu", $"Czas kary: {FormatTime(remainingTime)}");
             }
         }
 

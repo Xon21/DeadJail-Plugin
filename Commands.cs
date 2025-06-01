@@ -1,10 +1,11 @@
 ﻿using Rocket.API;
 using Rocket.Unturned.Chat;
 using Rocket.Unturned.Player;
-using System.Collections.Generic;
-using UnityEngine;
 using SDG.Unturned;
 using Steamworks;
+using System.Collections.Generic;
+using System.Linq;
+using UnityEngine;
 
 namespace StrefaOdrodzenia
 {
@@ -65,9 +66,13 @@ namespace StrefaOdrodzenia
             }
 
             // Sprawdź czy już istnieje strefa z priorytetem dla tej permisji
-            if (priority == "t" &&
-                AutoSpawnPlugin.Instance.Configuration.Instance.Zones.Exists(z =>
-                    z.Priority == "t" && z.RequiredPermission == permission))
+            // Poprawiony fragment (linia 121 i okolice)
+            bool priorityZoneExists = AutoSpawnPlugin.Instance.Configuration.Instance.Zones
+    .Any(z => z.Priority == "t" &&
+             !string.IsNullOrEmpty(z.RequiredPermission) &&
+             z.RequiredPermission == permission);
+
+            if (priority == "t" && !string.IsNullOrEmpty(permission) && priorityZoneExists)
             {
                 UnturnedChat.Say(player, "Już istnieje strefa z priorytetem dla tej permisji!", Color.red);
                 return;
@@ -107,7 +112,7 @@ namespace StrefaOdrodzenia
                 Center = new AutoSpawnPlugin.SimpleVector3(center.x, center.y, center.z),
                 TrapTimeSeconds = trapTime,
                 RequiredPermission = permission,
-                Priority = priority // Używamy Priority zamiast Bypass
+                Priority = priority
             };
 
             AutoSpawnPlugin.Instance.Configuration.Instance.Zones.Add(zone);
@@ -115,13 +120,14 @@ namespace StrefaOdrodzenia
             AutoSpawnPlugin.Instance.Points.Remove(player.CSteamID);
 
             UnturnedChat.Say(player,
-                $"Stworzono strefe {zoneName}! Czas: {AutoSpawnPlugin.Instance.FormatTime(trapTime)}, " +
-                $"Priority: {(priority == "t" ? "TAK" : "NIE")}",
-                Color.green);
+    $"Stworzono strefe {zoneName}! Czas: {AutoSpawnPlugin.Instance.FormatTime(trapTime)}, " +
+    $"Permisja: {(string.IsNullOrEmpty(permission) ? "brak" : permission)}, " +  // Poprawione - dodany brakujący nawias
+    $"Priority: {(priority == "t" ? "TAK" : "NIE")}",
+    Color.green);
         }
     }
 
-public class CommandNFZ : IRocketCommand
+        public class CommandNFZ : IRocketCommand
     {
         public AllowedCaller AllowedCaller => AllowedCaller.Player;
         public string Name => "nfz";
@@ -153,11 +159,10 @@ public class CommandNFZ : IRocketCommand
                 return;
             }
 
-            AutoSpawnPlugin.Instance.ForceReleasePlayer(target, true, true); // Poprawne wywołanie z 3 argumentami
+            AutoSpawnPlugin.Instance.ForceReleasePlayer(target, true, true);
             EffectManager.askEffectClearByID(8490, target.Player.channel.owner.transportConnection);
 
             UnturnedChat.Say(admin, $"Zwolniono {target.DisplayName} ze strefy!", Color.green);
-         //   UnturnedChat.Say(target, "Zostales zwolniony przez administratora!", Color.magenta);
         }
     }
 
@@ -183,10 +188,13 @@ public class CommandNFZ : IRocketCommand
             UnturnedChat.Say(player, "Aktywne strefy:", Color.blue);
             foreach (var zone in AutoSpawnPlugin.Instance.Configuration.Instance.Zones)
             {
+                string priorityInfo = zone.Priority == "t" ? " [PRIORYTET]" : "";
+                string permInfo = string.IsNullOrEmpty(zone.RequiredPermission) ? "Brak permisji" : $"Permisja: {zone.RequiredPermission}";
+
                 UnturnedChat.Say(player,
-                    $"{zone.ZoneName} - Czas: {AutoSpawnPlugin.Instance.FormatTime(zone.TrapTimeSeconds)} | " +
-                    $"Rozmiar: {zone.MaxX - zone.MinX:F0}x{zone.MaxZ - zone.MinZ:F0}x{zone.MaxY - zone.MinY:F0}",
-                    Color.cyan);
+                    $"{zone.ZoneName}{priorityInfo} - Czas: {AutoSpawnPlugin.Instance.FormatTime(zone.TrapTimeSeconds)} | " +
+                    $"{permInfo} | Rozmiar: {zone.MaxX - zone.MinX:F0}x{zone.MaxZ - zone.MinZ:F0}x{zone.MaxY - zone.MinY:F0}",
+                    zone.Priority == "t" ? Color.magenta : Color.cyan);
             }
         }
     }
